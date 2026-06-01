@@ -7,8 +7,6 @@
 
 # CNN+自作特徴量抽出+RandomForest
 
-# 引数とか関数とかかなり変えています。
-
 
 import os
 import cv2
@@ -354,9 +352,9 @@ def extract_features(image):
     grid_features = np.array(grid_features, dtype=np.float32)
 
     combined = np.concatenate((
-        cnn_features,
-        color_features,
-        grid_features
+        cnn_features * 3.0,
+        color_features * 0.3,
+        grid_features * 1.5
     ))
 
     return combined
@@ -514,6 +512,14 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
     print(f">> 次元削減: {X_train.shape[1]} -> {X_train_reduced.shape[1]}")
     print("\n>> --- Random Forest ハイパーパラメータチューニング ---")
     
+    idx = np.random.choice(len(X_train_reduced), 2000, replace=False)
+
+    visualize_pca_space(
+        X_train_reduced,
+        y_train,
+        class_names
+    )
+
     param_dist = {  
         'n_estimators': [100, 200, 300],         # 決定木の本数
         'max_features': ['sqrt', 'log2', None],  # 分割時に使用する特徴量数
@@ -528,7 +534,7 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
     search = RandomizedSearchCV(
         rf,                                     # RandomForestClassifier
         param_dist,                             # 試すパラメータ候補
-        n_iter=20,                              # 試行回数
+        n_iter=10,                              # 試行回数
         cv=3,                                   # n分割交差検証
         verbose=1,                              # 少し学習中の進行状況を表示
         random_state=random_state,              # 乱数固定
@@ -771,7 +777,9 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
 # --- メイン実行ブロック ---
 if __name__ == "__main__":
     start_time = time.perf_counter()
+    
     print("--- 犬猫の品種分類・類似画像検索プログラム ---")
+    
     # 類似検索・分類に使用するクエリ画像
     INPUT_IMAGE_PATH = "20-100images/Ragdoll/Ragdoll_4.jpg"
 
