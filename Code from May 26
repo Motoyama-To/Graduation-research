@@ -7,6 +7,8 @@
 
 # CNN+自作特徴量抽出+RandomForest
 
+# 関数・引数・定義など整理・高速化をした。( 特にfitなど )
+
 
 import os
 import cv2
@@ -46,7 +48,7 @@ IMAGE_SIZE = (128, 128)
 DATA_DIR = '20-100images'
 RANDOM_STATE = 42
 SIMILAR_IMAGES_TO_DISPLAY = 10 # 新しく表示する同品種の画像枚数
-TRAIN_MODE = False
+
 
 
 # --- 猫クラス ---
@@ -473,6 +475,12 @@ def extract_from_paths(paths, labels, image_size, augment=False):
                 continue
 
             relative = os.path.relpath(path, DATA_DIR)
+            
+            os.makedirs(
+                os.path.dirname(cache_name),
+                exist_ok=True
+            )
+            
             cache_name = os.path.join(
                 CROP_DIR,
                 relative
@@ -495,7 +503,7 @@ def extract_from_paths(paths, labels, image_size, augment=False):
             for idx, im in enumerate(images):
                 feature_cache_name = os.path.join(
                     FEATURE_DIR,
-                    relative.replace("\\", "_") + + f"_aug{idx}.npy"
+                    relative.replace("\\", "_") + f"_aug{idx}.npy"
                 )
 
                 if os.path.exists(feature_cache_name):
@@ -548,11 +556,15 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
     print(f">> 次元削減: {X_train.shape[1]} -> {X_train_reduced.shape[1]}")
     print("\n>> --- Random Forest ハイパーパラメータチューニング ---")
     
-    idx = np.random.choice(len(X_train_reduced), 2000, replace=False)
+    idx = np.random.choice(
+        len(X_train_reduced),
+        min(2000, len(X_train_reduced)),
+        replace=False
+    )
 
     visualize_pca_space(
-        X_train_reduced,
-        y_train,
+        X_train_reduced[idx],
+        y_train[idx],
         class_names
     )
 
@@ -632,7 +644,13 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
     joblib.dump(scaler, 'scaler.joblib')
     print("モデルが正常に保存されました。")
 
-    return best_rf, pca, scaler, search.best_params_ # 最適なパラメータも返す
+    return (
+        best_rf,
+        pca,
+        scaler,    
+        search.best_params_,
+        rf_no_pca
+    )
 
 def visualize_pca_space(X_reduced, y, class_names):
     plt.figure(figsize=(12, 10))
@@ -657,8 +675,7 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
     image_ids_train,
     class_names,
     feature_info,
-    X_train,
-    best_params
+    rf_no_pca
 ):
     print("\n>> --- 類似猫犬検出・品種推定 ---")
     
@@ -724,11 +741,8 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
     # --- 修正ここまで ---
 
     # 2. 個別の予測に対する説明を可視化
-    # PCA前のデータを使ってモデルを再訓練し、特徴量の重要度を取得
-    rf_no_pca_explain = RandomForestClassifier(random_state=RANDOM_STATE, **best_params)
-    rf_no_pca_explain.fit(X_train, y_train)
     
-    importances = rf_no_pca_explain.feature_importances_
+    importances = rf_no_pca.feature_importances_
     
     # 特徴量グループごとの重要度を合計
     original_feature_importance_map = {}
@@ -833,191 +847,177 @@ if __name__ == "__main__":
     # 特徴量グループの情報を取得
     feature_info = get_feature_info(IMAGE_SIZE)
 
-    if TRAIN_MODE:
-
-        print("=== TRAIN MODE ===")
 
     # 元画像のみ収集追加
-        filepaths, labels, class_names = collect_image_paths(DATA_DIR)
+    filepaths, labels, class_names = collect_image_paths(DATA_DIR)
 
-        # YOLO確認用
-        random_path = random.choice(filepaths)
+    # YOLO確認用
+    random_path = random.choice(filepaths)
 
-        test_img = cv2.imread(random_path)
+    test_img = cv2.imread(random_path)
 
-        cropped_img, detected_label = detect_and_crop_animal(test_img, yolo_model)
+    cropped_img, detected_label = detect_and_crop_animal(test_img, yolo_model)
 
-        print("選ばれた画像:", random_path)
-        print("YOLO判定:", detected_label)
+    print("選ばれた画像:", random_path)
+    print("YOLO判定:", detected_label)
 
-        # 表示
-        plt.figure(figsize=(5,5))
+    # 表示
+    plt.figure(figsize=(5,5))
 
-        img_rgb = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB)
+    img_rgb = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB)
 
-        plt.imshow(img_rgb)
-        plt.title(f"YOLO Detection: {detected_label}")
-        plt.axis("off")
-        plt.show()
+    plt.imshow(img_rgb)
+    plt.title(f"YOLO Detection: {detected_label}")
+    plt.axis("off")
+    plt.show()
 
-        # 元画像でtrain/test分割
-        train_paths, test_paths, y_train_orig, y_test_orig = train_test_split(
-            filepaths,
-            labels,
-            test_size=0.3,
-            stratify=labels,
-            random_state=RANDOM_STATE
-        )
-        print("train original:", len(train_paths))
-        print("test original:", len(test_paths))
+    # 元画像でtrain/test分割
+    train_paths, test_paths, y_train_orig, y_test_orig = train_test_split(
+        filepaths,
+        labels,
+        test_size=0.3,
+        stratify=labels,
+        random_state=RANDOM_STATE
+    )
+    print("train original:", len(train_paths))
+    print("test original:", len(test_paths))
 
-        # 猫と犬でデータを分離
-        cat_train_paths = []
-        cat_train_labels = []
+    # 猫・犬専用ラベル作成
+    cat_label_map = {
+        name: idx
+        for idx, name in enumerate(cat_class_names)
+    }
 
-        dog_train_paths = []
-        dog_train_labels = []
+    dog_label_map = {
+        name: idx
+        for idx, name in enumerate(dog_class_names)
+    }
 
-        for path, label in zip(train_paths, y_train_orig):
 
-            class_name = class_names[label]
+    # 猫と犬でデータを分離
+    cat_train_paths = []
+    cat_train_labels = []
 
-            if class_name in cat_classes:
-                cat_train_paths.append(path)
-                cat_train_labels.append(label)
+    dog_train_paths = []
+    dog_train_labels = []
 
-            elif class_name in dog_classes:
-                dog_train_paths.append(path)
-                dog_train_labels.append(label)
+    for path, label in zip(train_paths, y_train_orig):
 
-        cat_test_paths = []
-        cat_test_labels = []
+        class_name = class_names[label]
+        
+        if class_name in cat_classes:
 
-        dog_test_paths = []
-        dog_test_labels = []
+            cat_train_paths.append(path)
 
-        for path, label in zip(test_paths, y_test_orig):
+            cat_train_labels.append(
+                cat_label_map[class_name]
+            )
 
-            class_name = class_names[label]
+        elif class_name in dog_classes:
 
-            if class_name in cat_classes:
-                cat_test_paths.append(path)
-                cat_test_labels.append(label)
+            dog_train_paths.append(path)
 
-            elif class_name in dog_classes:
-                dog_test_paths.append(path)
-                dog_test_labels.append(label)
+            dog_train_labels.append(
+                dog_label_map[class_name]
+            )
 
-        print("猫 train:", len(cat_train_paths))     # 学習画像の数
-        print("犬 train:", len(dog_train_paths))
+    cat_test_paths = []
+    cat_test_labels = []
+
+    dog_test_paths = []
+    dog_test_labels = []
+
+    for path, label in zip(test_paths, y_test_orig):
+
+        class_name = class_names[label]
+
+        if class_name in cat_classes:
+            cat_test_paths.append(path)
+            cat_test_labels.append(
+                cat_label_map[class_name]
+            )
+
+        elif class_name in dog_classes:
+            dog_test_paths.append(path)
+            dog_test_labels.append(
+                dog_label_map[class_name]
+            )
+
+    print("猫 train:", len(cat_train_paths))     # 学習画像の数
+    print("犬 train:", len(dog_train_paths))
+
+
+    # 猫モデル
+    cat_features_train, cat_y_train, cat_filepaths_train, cat_image_ids_train = extract_from_paths(
+        cat_train_paths,
+        cat_train_labels,
+        IMAGE_SIZE,
+        augment=True
+    )
+
+    cat_features_test, cat_y_test, cat_filepaths_test, cat_image_ids_test = extract_from_paths(
+        cat_test_paths,
+        cat_test_labels,
+        IMAGE_SIZE,
+        augment=False
+    )
+
+    cat_X_train_scaled, cat_X_test_scaled, cat_y_train, cat_y_test, cat_scaler = prepare_data(
+        cat_features_train,
+        cat_features_test,
+        cat_y_train,
+        cat_y_test
+    )
+
+    cat_model, cat_pca, cat_scaler, cat_best_params, cat_rf_no_pca = train_and_evaluate_model(
+        cat_X_train_scaled,
+        cat_X_test_scaled,
+        cat_y_train,
+        cat_y_test,
+        cat_class_names,
+        cat_scaler,
+        feature_info=feature_info
+    )
+
+    cat_X_train_reduced = cat_pca.transform(cat_X_train_scaled)
+
+    # 犬モデル
+    dog_features_train, dog_y_train, dog_filepaths_train, dog_image_ids_train = extract_from_paths(
+        dog_train_paths,
+        dog_train_labels,
+        IMAGE_SIZE,
+        augment=True
+    )
+
+    dog_features_test, dog_y_test, dog_filepaths_test, dog_image_ids_test = extract_from_paths(
+        dog_test_paths,
+        dog_test_labels,
+        IMAGE_SIZE,
+        augment=False
+    )
+
+    dog_X_train_scaled, dog_X_test_scaled, dog_y_train, dog_y_test, dog_scaler = prepare_data(
+        dog_features_train,
+        dog_features_test,
+        dog_y_train,
+        dog_y_test
+    )
+
+    dog_model, dog_pca, dog_scaler, dog_best_params, dog_rf_no_pca = train_and_evaluate_model(
+        dog_X_train_scaled,
+        dog_X_test_scaled,
+        dog_y_train,
+        dog_y_test,
+        dog_class_names,
+        dog_scaler,
+        feature_info=feature_info
+    )
+
+    dog_X_train_reduced = dog_pca.transform(dog_X_train_scaled)
 
     
-        # 猫モデル
-        cat_features_train, cat_y_train, cat_filepaths_train, cat_image_ids_train = extract_from_paths(
-            cat_train_paths,
-            cat_train_labels,
-            IMAGE_SIZE,
-            augment=True
-        )
-
-        cat_features_test, cat_y_test, cat_filepaths_test, cat_image_ids_test = extract_from_paths(
-            cat_test_paths,
-            cat_test_labels,
-            IMAGE_SIZE,
-            augment=False
-        )
-
-        cat_X_train_scaled, cat_X_test_scaled, cat_y_train, cat_y_test, cat_scaler = prepare_data(
-            cat_features_train,
-            cat_features_test,
-            cat_y_train,
-            cat_y_test
-        )
-
-        cat_model, cat_pca, cat_scaler, cat_best_params = train_and_evaluate_model(
-            cat_X_train_scaled,
-            cat_X_test_scaled,
-            cat_y_train,
-            cat_y_test,
-            cat_class_names,
-            cat_scaler,
-            feature_info=feature_info
-        )
-
-        cat_X_train_reduced = cat_pca.transform(cat_X_train_scaled)
-
-        # 犬モデル
-        dog_features_train, dog_y_train, dog_filepaths_train, dog_image_ids_train = extract_from_paths(
-            dog_train_paths,
-            dog_train_labels,
-            IMAGE_SIZE,
-            augment=True
-        )
-
-        dog_features_test, dog_y_test, dog_filepaths_test, dog_image_ids_test = extract_from_paths(
-            dog_test_paths,
-            dog_test_labels,
-            IMAGE_SIZE,
-            augment=False
-        )
-
-        dog_X_train_scaled, dog_X_test_scaled, dog_y_train, dog_y_test, dog_scaler = prepare_data(
-            dog_features_train,
-            dog_features_test,
-            dog_y_train,
-            dog_y_test
-        )
-
-        dog_model, dog_pca, dog_scaler, dog_best_params = train_and_evaluate_model(
-            dog_X_train_scaled,
-            dog_X_test_scaled,
-            dog_y_train,
-            dog_y_test,
-            dog_class_names,
-            dog_scaler,
-            feature_info=feature_info
-        )
-
-        dog_X_train_reduced = dog_pca.transform(dog_X_train_scaled)
-
-        # 保存
-        os.makedirs("model", exist_ok=True)
-
-        joblib.dump(model, "model/model.joblib")
-        joblib.dump(pca, "model/pca.joblib")
-        joblib.dump(scaler, "model/scaler.joblib")
-
-        np.save("model/X_train_reduced.npy", X_train_reduced)
-        np.save("model/y_train.npy", y_train)
-        np.save("model/train_files.npy", train_files)
-
-        print("学習完了")
-
-    else:
-        print("=== PREDICT MODE ===")
-
-        # モデル読み込み
-        model = joblib.load("model/model.joblib")
-
-        pca = joblib.load("model/pca.joblib")
-
-        scaler = joblib.load("model/scaler.joblib")
-
-        # 類似画像検索用
-        X_train_reduced = np.load(
-            "model/X_train_reduced.npy"
-        )
-
-        y_train = np.load(
-            "model/y_train.npy"
-        )
-
-        train_files = np.load(
-            "model/train_files.npy",
-            allow_pickle=True
-        )
-
-        print("モデル読み込み完了")
+    print("学習完了")
+    print("モデル読み込み完了")
 
 
 
@@ -1074,10 +1074,9 @@ if __name__ == "__main__":
             cat_y_train,
             cat_filepaths_train,
             cat_image_ids_train,
-            class_names,
+            cat_class_names,
             feature_info,
-            cat_features_train,
-            cat_best_params
+            cat_rf_no_pca
         )
 
     else:
@@ -1090,10 +1089,9 @@ if __name__ == "__main__":
             dog_y_train,
             dog_filepaths_train,
             dog_image_ids_train,
-            class_names,
+            dog_class_names,
             feature_info,
-            dog_features_train,
-            dog_best_params
+            dog_rf_no_pca
         )
 
 
