@@ -7,8 +7,6 @@
 
 # CNN+自作特徴量抽出+RandomForest
 
-# 関数・引数・定義など整理・高速化をした。( 特にfitなど )
-
 
 import os
 import cv2
@@ -476,20 +474,23 @@ def extract_from_paths(paths, labels, image_size, augment=False):
 
             relative = os.path.relpath(path, DATA_DIR)
             
+            cache_name = os.path.join(
+                CROP_DIR,
+                relative
+            )
+            
             os.makedirs(
                 os.path.dirname(cache_name),
                 exist_ok=True
             )
             
-            cache_name = os.path.join(
-                CROP_DIR,
-                relative
-            )
 
             if os.path.exists(cache_name):
                 img = cv2.imread(cache_name)
             else:
                 img, _ = detect_and_crop_animal(img, yolo_model)
+                if img is None:
+                    continue
                 cv2.imwrite(cache_name, img)
 
             img = cv2.resize(img, image_size)
@@ -547,10 +548,10 @@ def prepare_data(X_train, X_test, y_train, y_test):
     return X_train_scaled, X_test_scaled, y_train, y_test, scaler
 
 # --- モデル訓練と評価関数 ---
-def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scaler, random_state=RANDOM_STATE, feature_info=None):
-    print("\n>> --- モデル訓練と評価 ---")
+def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scaler, model_name, random_state=RANDOM_STATE, feature_info=None):
+    print(f"\n>> --- {model_name}モデル訓練と評価 ---")
     print("\n>> --- PCAによる次元削減 ---")
-    pca = PCA(n_components=0.95, random_state=random_state)
+    pca = PCA(n_components=0.95, random_state=random_state) 
     X_train_reduced = pca.fit_transform(X_train)
     X_test_reduced = pca.transform(X_test)
     print(f">> 次元削減: {X_train.shape[1]} -> {X_train_reduced.shape[1]}")
@@ -565,7 +566,8 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
     visualize_pca_space(
         X_train_reduced[idx],
         y_train[idx],
-        class_names
+        class_names,
+        model_name
     )
 
     param_dist = {  
@@ -596,15 +598,15 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
     y_pred = best_rf.predict(X_test_reduced)
     acc = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred, average='weighted')
-    print(f">> Accuracy: {acc:.4f}")
-    print(f">> F1 Score: {f1:.4f}")
-    print(">> Classification Report:")
+    print(f">> [{model_name}]Accuracy: {acc:.4f}")
+    print(f">> [{model_name}]F1 Score: {f1:.4f}")
+    print(f">> [{model_name}]Classification Report:")
     print(classification_report(y_test, y_pred, target_names=class_names))
     
     cm = confusion_matrix(y_test, y_pred)
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-    plt.title('Random Forest Confusion Matrix')
+    plt.title(f'[{model_name}] Confusion Matrix')
     plt.xlabel('Predicted')
     plt.ylabel('True')
     plt.show()
@@ -630,7 +632,7 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
 
         fig, ax = plt.subplots(figsize=(12, 6))
         ax.bar(feature_names, original_feature_importance)
-        ax.set_title("全体の特徴量重要度")
+        ax.set_title(f"{model_name} 全体の特徴量重要度")
         ax.set_xlabel("特徴量タイプ")
         ax.set_ylabel("重要度 (合計)")
         plt.xticks(rotation=45, ha='right')
@@ -639,9 +641,9 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
 
     # --- モデルの保存 ---
     print("\n>> --- モデルをファイルに保存中 ---")
-    joblib.dump(best_rf, 'model.joblib')
-    joblib.dump(pca, 'pca.joblib')
-    joblib.dump(scaler, 'scaler.joblib')
+    joblib.dump(best_rf, f'{model_name}_model.joblib')
+    joblib.dump(pca, f'{model_name}_pca.joblib')
+    joblib.dump(scaler, f'{model_name}_scaler.joblib')
     print("モデルが正常に保存されました。")
 
     return (
@@ -652,11 +654,11 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scal
         rf_no_pca
     )
 
-def visualize_pca_space(X_reduced, y, class_names):
+def visualize_pca_space(X_reduced, y, class_names, model_names):
     plt.figure(figsize=(12, 10))
     for i, cname in enumerate(class_names):
         plt.scatter(X_reduced[y == i, 0], X_reduced[y == i, 1], label=cname, alpha=0.6, s=20)
-    plt.title('PCA Feature Space of Cat Breeds')
+    plt.title(f'{model_names} 品種特徴のPCA分布')
     plt.xlabel('PC1')
     plt.ylabel('PC2')
     plt.legend()
@@ -704,7 +706,7 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
 
     # --- Wikipediaで推定品種名を検索（修正済み） ---
     # 最初に「品種名 + 猫」で検索し、曖昧さ回避やページエラーの場合は「品種名」単体で再試行
-    search_queries = [predicted_breed_name + " 猫", predicted_breed_name]
+    search_queries = [predicted_breed_name + f" {animal_type}", predicted_breed_name]
     breed_description = "品種の説明が見つかりませんでした。"
     
     for query in search_queries:
@@ -804,6 +806,8 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
                 img = cropped_cache[filepath_augmented]
             else:
                 img, _ = detect_and_crop_animal(img, yolo_model)
+                if img is None:
+                    continue
                 cropped_cache[filepath_augmented] = img
 
             img_resized = cv2.resize(img, IMAGE_SIZE)
@@ -823,15 +827,6 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
         print("類似画像を表示できませんでした。")
     plt.tight_layout()
     plt.show()
-
-
-
-
-
-
-
-
-
 
 
 
@@ -976,6 +971,7 @@ if __name__ == "__main__":
         cat_y_test,
         cat_class_names,
         cat_scaler,
+        "猫",
         feature_info=feature_info
     )
 
@@ -1010,6 +1006,7 @@ if __name__ == "__main__":
         dog_y_test,
         dog_class_names,
         dog_scaler,
+        "犬",
         feature_info=feature_info
     )
 
@@ -1042,7 +1039,7 @@ if __name__ == "__main__":
         selected_features_train = cat_features_train
         selected_best_params = cat_best_params
 
-    else:
+    elif animal_type == "dog":
 
         print("犬モデルを使用")
 
@@ -1056,6 +1053,9 @@ if __name__ == "__main__":
         selected_image_ids = dog_image_ids_train
         selected_features_train = dog_features_train
         selected_best_params = dog_best_params
+    
+    else:
+        print("犬猫を検出できません")
 
     
     # 類似猫の検出と予測（強化版・説明機能追加）
