@@ -740,7 +740,7 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
     
     print(f"推定品種名: {predicted_breed_name}")
     print(f"品種説明: {breed_description}")
-    # --- 修正ここまで ---
+  
 
     # 2. 個別の予測に対する説明を可視化
     
