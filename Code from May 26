@@ -60,7 +60,6 @@ cat_classes = [
     "Maine_Coon",
     "Persian",
     "Ragdoll",
-    "Russian_Blue",
     "Sphynx"
 ]
 
@@ -68,6 +67,7 @@ cat_classes = [
 dog_classes = [
     "american_bulldog",
     "beagle",
+    "Boxer",
     "chihuahua",
     "english_setter",
     "german_shorthaired",
@@ -82,8 +82,8 @@ dog_class_names = sorted(dog_classes)
 
 print(os.getcwd())
 
-# Wikipedia日本語設定
-wikipedia.set_lang("ja")
+# Wikipedia英語設定
+wikipedia.set_lang("en")
 
 cropped_cache = {}
 CROP_DIR = "cropped_cache"
@@ -677,7 +677,8 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
     image_ids_train,
     class_names,
     feature_info,
-    rf_no_pca
+    rf_no_pca,
+    animal_type
 ):
     print("\n>> --- 類似猫犬検出・品種推定 ---")
     
@@ -704,7 +705,7 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
     predicted_label_idx = model.predict(query_features_reduced)[0]
     predicted_breed_name = class_names[predicted_label_idx]
 
-    # --- Wikipediaで推定品種名を検索（修正済み） ---
+    # --- Wikipediaで推定品種名を検索 ---
     # 最初に「品種名 + 猫」で検索し、曖昧さ回避やページエラーの場合は「品種名」単体で再試行
     search_queries = [predicted_breed_name + f" {animal_type}", predicted_breed_name]
     breed_description = "品種の説明が見つかりませんでした。"
@@ -1076,7 +1077,8 @@ if __name__ == "__main__":
             cat_image_ids_train,
             cat_class_names,
             feature_info,
-            cat_rf_no_pca
+            cat_rf_no_pca,
+            animal_type
         )
 
     else:
@@ -1091,7 +1093,8 @@ if __name__ == "__main__":
             dog_image_ids_train,
             dog_class_names,
             feature_info,
-            dog_rf_no_pca
+            dog_rf_no_pca,
+            animal_type
         )
 
 
