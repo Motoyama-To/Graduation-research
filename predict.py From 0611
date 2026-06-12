@@ -319,11 +319,12 @@ def find_and_display_similar_dogs_and_cats_with_prediction(
     print("\n>> --- 類似猫犬検出・品種推定 ---")
     
     query_img = cv2.imread(query_image_path)
-    query_img , _ = detect_and_crop_animal(query_img, yolo_model)
     
     if query_img is None:
         print(f"エラー: クエリ画像を読み込めません: {query_image_path}")
         return
+    query_img , _ = detect_and_crop_animal(query_img, yolo_model)
+    
     query_img_resized = cv2.resize(query_img, IMAGE_SIZE)
     
     # オリジナル特徴量の抽出
@@ -473,13 +474,34 @@ if __name__ == "__main__":
     print("--- 犬猫の品種分類・類似画像検索プログラム ---")
 
     # 類似検索・分類に使用するクエリ画像
-    INPUT_IMAGE_PATH = "20-100images/Ragdoll/Ragdoll_4.jpg"
+    PREDICT_DIR = "predictimages"
+
+    image_files = []
+
+    for breed in os.listdir(PREDICT_DIR):
+        breed_path = os.path.join(PREDICT_DIR, breed)
+
+        if os.path.isdir(breed_path):
+            for f in os.listdir(breed_path):
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
+                    image_files.append(
+                        os.path.join(breed_path, f)
+                    )
+
+    if len(image_files) == 0:
+        raise ValueError("predictimagesフォルダ内に画像がありません")
+
+    INPUT_IMAGE_PATH = random.choice(image_files)
+
+    print(f"選択された画像: {INPUT_IMAGE_PATH}")
 
     # 特徴量グループの情報を取得
     feature_info = get_feature_info(IMAGE_SIZE)
 
     # --- YOLOで犬/猫判定 ---
     query_img = cv2.imread(INPUT_IMAGE_PATH)
+    if query_img is None:
+        raise ValueError(f"画像を読み込めません: {INPUT_IMAGE_PATH}")
     _, animal_type = detect_and_crop_animal(query_img, yolo_model)
     
     print("YOLO動物判定:", animal_type)
@@ -495,9 +517,6 @@ if __name__ == "__main__":
 
     
     # 類似猫の検出と予測（強化版・説明機能追加）
-    query_img = cv2.imread(INPUT_IMAGE_PATH)
-    _, animal_type = detect_and_crop_animal(query_img, yolo_model)
-
     print("動物タイプ:", animal_type)
 
     if animal_type == "cat":
@@ -515,7 +534,7 @@ if __name__ == "__main__":
             animal_type
         )
 
-    else:
+    elif animal_type == "dog":
         find_and_display_similar_dogs_and_cats_with_prediction(
             INPUT_IMAGE_PATH,
             dog_model,
@@ -529,6 +548,9 @@ if __name__ == "__main__":
             dog_rf_no_pca,
             animal_type
         )
+    else:
+        print("犬猫を検出できませんでした")
+        exit()
 
     
     end_time = time.perf_counter()
