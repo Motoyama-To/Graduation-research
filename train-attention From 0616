@@ -5,7 +5,7 @@
 # ResNet18 -- CBAM -- AdaptiveAvgPool -- Linear
 
 # YOLO + ResNet + CBAM Attention
-
+# YOLO前処理 + End-to-End分類器
 # train-attention.py
 
 
