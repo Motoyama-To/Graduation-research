@@ -1,11 +1,15 @@
 # 猫+犬 品種分類・類似画像検索プログラム
 
-# データ生成 -- YOLOで犬猫の切り出し -- resize -- データ拡張 -- ResNet -- CBAM Attention -- 評価
+# 入力画像 -- YOLOv8 検出と切り出し -- ResNet18特徴抽出 
+# CBAM Attention
+#   ├─ CAM : どの特徴を見るか
+#   └─ SAM : どの位置を見るか
+# Adaptive Average Pooling -- 全結合層 (Linear) -- 品種分類（猫10種・犬10種）
 
-# ResNet18 -- CBAM -- AdaptiveAvgPool -- Linear
 
-# YOLO + ResNet + CBAM Attention
-# YOLO前処理 + End-to-End分類器
+# YOLO前処理 + ResNet18 + CBAM による End-to-End分類器
+
+
 # train-attention.py
 
 
@@ -90,21 +94,15 @@ os.makedirs(CROP_DIR, exist_ok=True)
 train_transform = transforms.Compose([
 
     transforms.ToPILImage(),
-
     transforms.Resize((224,224)),
-
-    transforms.RandomHorizontalFlip(),
-
-    transforms.RandomRotation(10),
-
-    transforms.ColorJitter(
+    transforms.RandomHorizontalFlip(),   # 50%で左右反転
+    transforms.RandomRotation(10),       # ±10度以内でランダム回転
+    transforms.ColorJitter(              # 明るさ・コントラストをランダム変更
         brightness=0.2,
         contrast=0.2
     ),
-
     transforms.ToTensor(),
-
-    transforms.Normalize(
+    transforms.Normalize(                # 正規化
         mean=[0.485,0.456,0.406],
         std=[0.229,0.224,0.225]
     )
@@ -112,13 +110,9 @@ train_transform = transforms.Compose([
 
 # --- テスト用のTransform ---
 test_transform = transforms.Compose([
-
     transforms.ToPILImage(),
-
     transforms.Resize((224,224)),
-
     transforms.ToTensor(),
-
     transforms.Normalize(
         mean=[0.485,0.456,0.406],
         std=[0.229,0.224,0.225]
@@ -179,7 +173,7 @@ resnet = torch.nn.Sequential(
 resnet.eval()
 resnet.to(device)
 
-# CBAM Attention Module
+# --- 特徴注意モジュール Channel Attention Module  どの特徴を見るか ---
 class CAM(nn.Module):
 
     def __init__(self, in_planes, ratio=16):
@@ -188,28 +182,29 @@ class CAM(nn.Module):
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
 
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),
+        # 全結合層の代わりの1×1畳み込み
+        self.fc = nn.Sequential(       
+            nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),   # チャネル数を圧縮
             nn.ReLU(),
-            nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
+            nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)    # 元のチャネル数に戻す
         )
 
-        self.sigmoid = nn.Sigmoid()
+        self.sigmoid = nn.Sigmoid()             # 0～1の重みへ変換
 
     def forward(self, x):
 
-        avg_out = self.fc(self.avg_pool(x))
+        avg_out = self.fc(self.avg_pool(x))     # 注意重み計算
         max_out = self.fc(self.max_pool(x))
 
         return self.sigmoid(avg_out + max_out)
 
-# --- 空間注意モジュール Spatial Attention Module ---
+# --- 空間注意モジュール Spatial Attention Module  どこを見るか ---
 class SAM(nn.Module):
 
     def __init__(self):
         super().__init__()
 
-        self.conv = nn.Conv2d(
+        self.conv = nn.Conv2d(                  # 7×7畳み込みで空間方向の注意を計算
             2,
             1,
             kernel_size=7,
@@ -220,8 +215,7 @@ class SAM(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-
-        avg_out = torch.mean(
+        avg_out = torch.mean(               # チャネル方向の平均
             x,
             dim=1,
             keepdim=True
@@ -253,8 +247,8 @@ class CBAM(nn.Module):
 
     def forward(self, x):
 
-        x = self.ca(x) * x
-        x = self.sa(x) * x
+        x = self.ca(x) * x              # 重要な特徴チャネルを強調
+        x = self.sa(x) * x              # 重要な空間領域を強調
 
         return x
 
@@ -266,25 +260,22 @@ def train_model(
     num_epochs=10
 ):
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss()           # 損失関数（多クラス分類）
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.Adam(               # Adam最適化
         model.parameters(),
         lr=0.0001
     )
 
     model.to(device)
 
-    for epoch in range(num_epochs):
-
+    for epoch in range(num_epochs):             # 学習
         model.train()
-
         running_loss = 0
 
-        for images, labels in train_loader:
+        for images, labels in train_loader:     # ミニバッチ学習
 
             images = images.to(device)
-
             labels = labels.to(device)
 
             optimizer.zero_grad()
@@ -296,11 +287,9 @@ def train_model(
                 labels
             )
 
-            loss.backward()
-
-            optimizer.step()
-
-            running_loss += loss.item()
+            loss.backward()                     # 誤差逆伝播       
+            optimizer.step()                    # パラメータ更新
+            running_loss += loss.item()         # 損失累積
 
         print(
             f"Epoch {epoch+1}/{num_epochs}",
@@ -313,14 +302,13 @@ def train_model(
 class BreedClassifier(nn.Module):
 
     def __init__(self, num_classes):
-
         super().__init__()
 
         self.backbone = models.resnet18(
             weights=models.ResNet18_Weights.DEFAULT
         )
 
-        self.features = nn.Sequential(
+        self.features = nn.Sequential(              # 最終分類層を除いた特徴抽出部分
             *list(self.backbone.children())[:-2]
         )
 
@@ -336,15 +324,10 @@ class BreedClassifier(nn.Module):
     def forward(self, x):
 
         x = self.features(x)
-
-        x = self.cbam(x)
-
+        x = self.cbam(x)                # CBAMで強調
         x = self.pool(x)
-
-        x = torch.flatten(x, 1)
-
-        x = self.fc(x)
-
+        x = torch.flatten(x, 1)         # ベクトル化
+        x = self.fc(x)                  # 品種分類
         return x
 
 # --- データセットクラス ---
@@ -366,22 +349,11 @@ class PetDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-
         img_path = self.image_paths[idx]
-
         label = self.labels[idx]
-
         img = cv2.imread(img_path)
-
-        img, _ = detect_and_crop_animal(
-            img,
-            yolo_model
-        )
-
-        img = cv2.cvtColor(
-            img,
-            cv2.COLOR_BGR2RGB
-        )
+        img, _ = detect_and_crop_animal(img, yolo_model)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)          # BGR → RGBへ変換
 
         if self.transform:
             img = self.transform(img)
