@@ -578,7 +578,7 @@ if __name__ == "__main__":
         cat_model,
         cat_train_loader,
         cat_test_loader,
-        num_epochs=1
+        num_epochs=10
     )
 
     evaluate_model(
@@ -632,7 +632,7 @@ if __name__ == "__main__":
         dog_model,
         dog_train_loader,
         dog_test_loader,
-        num_epochs=1
+        num_epochs=10
     )
 
     evaluate_model(
