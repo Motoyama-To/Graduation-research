@@ -11,7 +11,6 @@
 
 # train-attention.py
 
-
 import os
 import cv2
 import numpy as np
@@ -435,107 +434,7 @@ def collect_image_paths(data_dir):
     return np.array(filepaths), np.array(labels), class_names
 
 
-def apply_data_augmentation(img):
-    return [img]
-
-
-# --- データ読み込みと拡張関数 ---
-def load_and_augment_data(data_dir, image_size):
-    all_features = []
-    all_labels = []
-    all_filepaths = []
-    all_image_ids = []
-    image_id_counter = 0
-    # クラス名取得
-    class_names = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
-    print(f">> 分類カテゴリ: {class_names}")
-    # 元画像枚数カウント
-    total_original_images = sum([len(files) for r, d, files in os.walk(data_dir) if files])
-    processed_original_images = 0
-    # クラスごとに処理
-    for class_idx, class_name in enumerate(class_names):
-        class_path = os.path.join(data_dir, class_name)
-        for img_name in os.listdir(class_path):
-            img_path = os.path.join(class_path, img_name)
-            if not img_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-                continue
-            try:
-                img = cv2.imread(img_path)
-                if img is None:
-                    print(f"Warning: 画像を読み込めませんでした: {img_path}")
-                    continue
-                img = cv2.resize(img, image_size)
-                relative = os.path.relpath(img_path, DATA_DIR)
-                # データ拡張
-                augmented_images = apply_data_augmentation(img)
-                for aug_img in augmented_images:
-                    all_features.append(aug_img)
-                    all_labels.append(class_idx)
-                    all_filepaths.append(img_path)
-                    all_image_ids.append(image_id_counter)
-                image_id_counter += 1
-            
-            except Exception as e:
-                print(f"Warning: 画像 {img_path} の処理中にエラー: {e}")
-                continue
-            finally:
-                processed_original_images += 1
-                if processed_original_images % 100 == 0 or processed_original_images == total_original_images:
-                    print(f">>   {processed_original_images}/{total_original_images} 個のオリジナル画像を処理中...")
-    print(f">> 合計 {len(all_features)} 枚の拡張画像を読み込みました。")
-    return np.array(all_features), np.array(all_labels), np.array(all_filepaths), np.array(all_image_ids), class_names
-
-def extract_from_paths(paths, labels, image_size, augment=False):
-        all_features = []
-        all_labels = []
-        all_filepaths = []
-        all_image_ids = []
-
-        image_id = 0
-
-        for path, label in zip(paths, labels):
-
-            img = cv2.imread(path)
-            if img is None:
-                continue
-
-            relative = os.path.relpath(path, DATA_DIR)
-            
-            cache_name = os.path.join(
-                CROP_DIR,
-                relative
-            )
-            
-            os.makedirs(
-                os.path.dirname(cache_name),
-                exist_ok=True
-            )
-            
-
-            if os.path.exists(cache_name):
-                img = cv2.imread(cache_name)
-            else:
-                img, _ = detect_and_crop_animal(img, yolo_model)
-                if img is None:
-                    continue
-                cv2.imwrite(cache_name, img)
-
-            img = cv2.resize(img, image_size)
-
-            
-            images = [img]
-
-
-        return (
-            np.array(all_features),
-            np.array(all_labels),
-            np.array(all_filepaths),
-            np.array(all_image_ids)
-        )
-
-
-
-# --- メイン実行ブロック ---
+# --- Main ---
 if __name__ == "__main__":
     start_time = time.perf_counter()
     
