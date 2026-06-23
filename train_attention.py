@@ -9,7 +9,6 @@
 
 # YOLO前処理 + ResNet18 + CBAM による End-to-End分類器
 
-
 # train-attention.py
 
 
@@ -434,6 +433,10 @@ def collect_image_paths(data_dir):
                 labels.append(class_idx)
 
     return np.array(filepaths), np.array(labels), class_names
+
+
+def apply_data_augmentation(img):
+    return [img]
 
 
 # --- データ読み込みと拡張関数 ---
