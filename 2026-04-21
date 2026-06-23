@@ -1,0 +1,738 @@
+# 先輩から貰ったコードを変更した。
+# 猫+犬 品種分類・類似画像検索プログラム
+
+# データ生成--特徴抽出--次元削減--分類学習--推論--類似検索--説明
+
+#画像パス取得--train/test分割--SIFT descriptor収集--kmeans.fit()
+#特徴抽出--標準化--PCA--RandomForest学習--類似検索
+
+
+import os
+import cv2
+import numpy as np
+import random
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+import wikipedia
+from rembg import remove
+from PIL import Image
+from scipy.spatial.distance import euclidean
+import joblib # モデル保存のために追加
+from skimage.feature import local_binary_pattern # LBPのために追加
+from sklearn.cluster import MiniBatchKMeans # SIFT特徴量のクラスタリングのために追加
+from sklearn.metrics.pairwise import cosine_similarity # コサイン類似度のために追加
+
+# --- Matplotlibの日本語表示設定 ---
+try:
+    plt.rcParams['font.family'] = 'Meiryo'
+except Exception:
+    pass
+plt.rcParams['axes.unicode_minus'] = False
+
+# --- 定数 ---
+IMAGE_SIZE = (128, 128)
+DATA_DIR = 'cat_cat1'
+RANDOM_STATE = 42
+SIMILAR_IMAGES_TO_DISPLAY = 5 # 新しく表示する同品種の画像枚数
+
+print(os.getcwd())
+
+# Wikipedia日本語設定
+wikipedia.set_lang("ja")
+
+# --- 背景除去関数 ---
+def remove_background(image_np):
+    """NumPy配列の画像から背景を削除する。"""
+    try:
+        image_pil = Image.fromarray(cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB))
+        output_pil = remove(image_pil)
+        output_np = cv2.cvtColor(np.array(output_pil), cv2.COLOR_RGBA2BGRA)
+        return output_np
+    except Exception as e:
+        print(f"背景除去中にエラーが発生しました: {e}. 元の画像を返します。")
+        return cv2.cvtColor(image_np, cv2.COLOR_BGR2BGRA)
+
+def fill_transparent_background(image_bgra, fill_color=(255, 255, 255)):
+    """RGBA/BGRA画像の透明部分を指定の色で埋める。"""
+    alpha = image_bgra[:, :, 3] / 255.0
+    alpha = np.expand_dims(alpha, axis=2)
+    bg_image = np.full(image_bgra.shape, fill_color + (255,), dtype=np.float32)
+    blended = image_bgra[:, :, :3].astype(np.float32) * alpha + bg_image[:, :, :3] * (1 - alpha)
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+# --- 元画像パス収集（リーク防止用） ---
+def collect_image_paths(data_dir):
+    filepaths = []
+    labels = []
+    class_names = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
+
+    for class_idx, class_name in enumerate(class_names):
+        class_path = os.path.join(data_dir, class_name)
+        for img_name in os.listdir(class_path):
+            img_path = os.path.join(class_path, img_name)
+            if img_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                filepaths.append(img_path)
+                labels.append(class_idx)
+
+    return np.array(filepaths), np.array(labels), class_names
+
+# --- データ拡張関数 ---
+def apply_data_augmentation(image):
+    augmented_images = [image]
+    # rotate
+    for angle in [-10, 10]:
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        augmented_images.append(rotated)
+    for _ in range(2):
+        zoom_factor = random.uniform(0.9, 1.1)
+        h, w = image.shape[:2]
+        # zoom in 
+        if zoom_factor <= 1.0:
+            zh, zw = int(h * zoom_factor), int(w * zoom_factor)
+            start_h, start_w = (h - zh) // 2, (w - zw) // 2
+            cropped = image[start_h:start_h+zh, start_w:start_w+zw]
+            zoomed = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+            augmented_images.append(zoomed)
+        # zoom out
+        else:
+            zh, zw = int(h / zoom_factor), int(w / zoom_factor)
+            zoomed_out = cv2.resize(image, (zw, zh), interpolation=cv2.INTER_LINEAR)
+            padded = np.zeros_like(image)
+            start_h, start_w = (h - zh) // 2, (w - zw) // 2
+            padded[start_h:start_h+zh, start_w:start_w+zw] = zoomed_out
+            augmented_images.append(padded)
+    # bright
+    for _ in range(2):
+        factor = random.uniform(0.8, 1.2)
+        bright = np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+        augmented_images.append(bright)
+    # Horizontal flip
+    flipped = cv2.flip(image, 1)
+    augmented_images.append(flipped)
+    # Horizontal shear
+    shear_factor = random.uniform(-0.1, 0.1)
+    rows, cols = image.shape[:2]
+    M_shear = np.float32([[1, shear_factor, 0], [0, 1, 0]])
+    sheared = cv2.warpAffine(image, M_shear, (cols, rows), borderMode=cv2.BORDER_REFLECT_101)
+    augmented_images.append(sheared)
+    # Vertical shear
+    M_shear_v = np.float32([[1, 0, 0], [shear_factor, 1, 0]])
+    sheared_v = cv2.warpAffine(image, M_shear_v, (cols, rows), borderMode=cv2.BORDER_REFLECT_101)
+    augmented_images.append(sheared_v)
+    # shift
+    for _ in range(2):
+        max_shift = 0.05
+        tx = int(random.uniform(-max_shift, max_shift) * cols)
+        ty = int(random.uniform(-max_shift, max_shift) * rows)
+        M_shift = np.float32([[1, 0, tx], [0, 1, ty]])
+        shifted = cv2.warpAffine(image, M_shift, (cols, rows), borderMode=cv2.BORDER_REFLECT_101)
+        augmented_images.append(shifted)
+    return augmented_images
+
+    
+
+
+
+# --- 特徴量抽出関数 ---
+def extract_features(image, face_cascade, sift, kmeans):
+    if image is None:
+        return None
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # HOG 形状
+    winSize = (gray.shape[1], gray.shape[0])
+    blockSize = (16, 16)
+    blockStride = (8, 8)
+    cellSize = (8, 8)
+    nbins = 9
+    # HOGオブジェクト生成
+    hog = cv2.HOGDescriptor(winSize, blockSize, blockStride, cellSize, nbins)
+    hog_features = hog.compute(gray)
+    if hog_features is None:
+        hog_features = np.zeros((hog.getDescriptorSize(), 1))
+    # 1次元ベクトル化
+    hog_features = hog_features.flatten()
+    
+    # LBP テクスチャ
+    lbp = local_binary_pattern(gray, P=8, R=1, method="uniform")
+    (hist, _) = np.histogram(lbp.ravel(), bins=256, range=(0, 256))
+    lbp_hist = hist.astype(np.float32)
+    lbp_hist /= (lbp_hist.sum() + 1e-7)
+    
+    # Color Histogram  毛色
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hist_h = cv2.calcHist([hsv], [0], None, [180], [0, 180]).flatten()
+    hist_s = cv2.calcHist([hsv], [1], None, [256], [0, 256]).flatten()
+    hist_v = cv2.calcHist([hsv], [2], None, [256], [0, 256]).flatten()
+    color_features = np.concatenate((hist_h, hist_s, hist_v))
+    if color_features.sum() > 0:
+        color_features /= color_features.sum()
+    
+    # Face Features  顔毛色
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    face_features = np.zeros(5)
+    face_color_features = np.zeros(180 + 256 + 256)
+    if len(faces) > 0:
+        x, y, w, h = faces[0]
+        face_features = np.array([1, x / image.shape[1], y / image.shape[0], w / image.shape[1], h / image.shape[0]])
+        face_roi = image[y:y+h, x:x+w]
+        if face_roi.size > 0:
+            hsv_face = cv2.cvtColor(face_roi, cv2.COLOR_BGR2HSV)
+            hist_h_face = cv2.calcHist([hsv_face], [0], None, [180], [0, 180]).flatten()
+            hist_s_face = cv2.calcHist([hsv_face], [1], None, [256], [0, 256]).flatten()
+            hist_v_face = cv2.calcHist([hsv_face], [2], None, [256], [0, 256]).flatten()
+            face_color_features = np.concatenate((hist_h_face, hist_s_face, hist_v_face))
+            if face_color_features.sum() > 0:
+                face_color_features /= face_color_features.sum()
+    
+    # SIFT  局所特徴
+    _, descriptors = sift.detectAndCompute(gray, None)
+
+    if descriptors is not None:
+        words = kmeans.predict(descriptors)
+        hist = np.bincount(words, minlength=64).astype(np.float32)
+        hist /= (hist.sum() + 1e-7)
+
+        sift_features = hist
+    else:
+        sift_features = np.zeros(64, dtype=np.float32)
+
+    
+
+    combined = np.concatenate((
+        hog_features, 
+        lbp_hist, 
+        color_features, 
+        face_features, 
+        face_color_features, 
+        sift_features
+    ))
+    return combined
+
+# --- 特徴量の名前と範囲を定義 ---
+def get_feature_info(image_size):
+    dummy_gray = np.zeros(image_size, dtype=np.uint8)
+    
+    # HOG
+    winSize = (dummy_gray.shape[1], dummy_gray.shape[0])
+    blockSize = (16, 16)
+    blockStride = (8, 8)
+    cellSize = (8, 8)
+    nbins = 9
+    hog = cv2.HOGDescriptor(winSize, blockSize, blockStride, cellSize, nbins)
+    hog_dim = hog.getDescriptorSize()
+    
+    # LBP
+    lbp_dim = 256
+    
+    # Color Histogram
+    color_dim = 180 + 256 + 256
+    
+    # Face Features
+    face_dim = 5
+    face_color_dim = 180 + 256 + 256
+
+    # SIFT
+    sift_dim = 64
+
+    feature_info = {
+        'HOG': {'start': 0, 'end': hog_dim},
+        'LBP': {'start': hog_dim, 'end': hog_dim + lbp_dim},
+        'Color Histogram': {'start': hog_dim + lbp_dim, 'end': hog_dim + lbp_dim + color_dim},
+        'Face Features': {'start': hog_dim + lbp_dim + color_dim, 'end': hog_dim + lbp_dim + color_dim + face_dim},
+        'Face Color Hist': {'start': hog_dim + lbp_dim + color_dim + face_dim, 'end': hog_dim + lbp_dim + color_dim + face_dim + face_color_dim},
+        'SIFT': {'start': hog_dim + lbp_dim + color_dim + face_dim + face_color_dim, 'end': hog_dim + lbp_dim + color_dim + face_dim + face_color_dim + sift_dim},
+    }
+    return feature_info
+
+# --- データ読み込みと拡張関数 ---
+def load_and_augment_data(data_dir, image_size, face_cascade, sift_extractor):
+    all_features = []
+    all_labels = []
+    all_filepaths = []
+    all_image_ids = []
+    image_id_counter = 0
+    # クラス名取得
+    class_names = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
+    print(f">> 分類カテゴリ: {class_names}")
+    # 元画像枚数カウント
+    total_original_images = sum([len(files) for r, d, files in os.walk(data_dir) if files])
+    processed_original_images = 0
+    # クラスごとに処理
+    for class_idx, class_name in enumerate(class_names):
+        class_path = os.path.join(data_dir, class_name)
+        for img_name in os.listdir(class_path):
+            img_path = os.path.join(class_path, img_name)
+            if not img_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                continue
+            try:
+                img = cv2.imread(img_path)
+                if img is None:
+                    print(f"Warning: 画像を読み込めませんでした: {img_path}")
+                    continue
+                img = cv2.resize(img, image_size)
+                img_bgra = remove_background(img)
+                img_no_bg = fill_transparent_background(img_bgra, fill_color=(255, 255, 255))
+                # データ拡張
+                augmented_images = apply_data_augmentation(img_no_bg)
+                # 各拡張画像から特徴抽出
+                for aug_img in augmented_images:
+                    features = extract_features(aug_img, face_cascade, sift_extractor, kmeans)
+                    if features is not None:
+                        all_features.append(features)
+                        all_labels.append(class_idx)
+                        all_filepaths.append(img_path)
+                        all_image_ids.append(image_id_counter)
+                        image_id_counter += 1
+            except Exception as e:
+                print(f"Warning: 画像 {img_path} の処理中にエラー: {e}")
+                continue
+            finally:
+                processed_original_images += 1
+                if processed_original_images % 100 == 0 or processed_original_images == total_original_images:
+                    print(f">>   {processed_original_images}/{total_original_images} 個のオリジナル画像を処理中...")
+    print(f">> 合計 {len(all_features)} 枚の拡張画像を読み込みました。")
+    return np.array(all_features), np.array(all_labels), np.array(all_filepaths), np.array(all_image_ids), class_names
+
+def extract_from_paths(paths, labels, image_size, face_cascade, sift_extractor, kmeans, augment=False):
+        all_features = []
+        all_labels = []
+        all_filepaths = []
+        all_image_ids = []
+
+        image_id = 0
+
+        for path, label in zip(paths, labels):
+
+            img = cv2.imread(path)
+            if img is None:
+                continue
+
+            img = cv2.resize(img, image_size)
+
+            img_bgra = remove_background(img)
+            img_no_bg = fill_transparent_background(img_bgra)
+
+            images = [img_no_bg]
+
+            if augment:
+                images = apply_data_augmentation(img_no_bg)
+
+            for im in images:
+
+                features = extract_features(im, face_cascade, sift_extractor, kmeans)
+
+                if features is not None:
+                    all_features.append(features)
+                    all_labels.append(label)
+                    all_filepaths.append(path)
+                    all_image_ids.append(image_id)
+                    image_id += 1
+
+        return (
+            np.array(all_features),
+            np.array(all_labels),
+            np.array(all_filepaths),
+            np.array(all_image_ids)
+        )
+
+
+# --- データ準備関数 ---
+def prepare_data(X_train, X_test, y_train, y_test):
+
+    print("\n>> --- データ準備 ---")
+
+    print(f"train: {len(X_train)}")
+    print(f"test: {len(X_test)}")
+
+    scaler = StandardScaler()
+
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    print("標準化完了")
+
+    return X_train_scaled, X_test_scaled, y_train, y_test, scaler
+
+# --- モデル訓練と評価関数 ---
+def train_and_evaluate_model(X_train, X_test, y_train, y_test, class_names, scaler, random_state=RANDOM_STATE, feature_info=None):
+    print("\n>> --- モデル訓練と評価 ---")
+    print("\n>> --- PCAによる次元削減 ---")
+    pca = PCA(n_components=100, random_state=random_state)
+    X_train_reduced = pca.fit_transform(X_train)
+    X_test_reduced = pca.transform(X_test)
+    print(f">> 次元削減: {X_train.shape[1]} -> {X_train_reduced.shape[1]}")
+    print("\n>> --- Random Forest ハイパーパラメータチューニング ---")
+    
+    param_dist = {  
+        'n_estimators': [100, 200, 300],         # 決定木の本数
+        'max_features': ['sqrt', 'log2', None],  # 分割時に使用する特徴量数
+        'max_depth': [10, 20, None],             # 木の最大深さ
+        'min_samples_split': [2, 5],             # ノード分割に必要な最小サンプル数
+        'min_samples_leaf': [1, 2],              # 葉ノードに必要な最小サンプル数
+        'bootstrap': [True, False]               # ブートストラップサンプリングを使うか
+    }
+    
+    rf = RandomForestClassifier(random_state=random_state)
+    search = RandomizedSearchCV(rf, param_dist, n_iter=10, cv=3, verbose=1, random_state=random_state, n_jobs=-1)
+    search.fit(X_train_reduced, y_train)
+    best_rf = search.best_estimator_
+    print(f">> 最適パラメータ: {search.best_params_}")
+    
+    y_pred = best_rf.predict(X_test_reduced)
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, average='weighted')
+    print(f">> Accuracy: {acc:.4f}")
+    print(f">> F1 Score: {f1:.4f}")
+    print(">> Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=class_names))
+    
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.title('Random Forest Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.show()
+
+    # --- 特徴量全体の重要度を可視化 ---
+    print("\n>> --- 特徴量全体の重要度 ---")
+    if feature_info:
+        # PCA前のデータを使ってモデルを再訓練し、特徴量の重要度を取得
+        # ハイパーパラメータはチューニング結果を使用
+        params = search.best_params_.copy()
+        if 'random_state' in params:
+            del params['random_state']
+
+        rf_no_pca = RandomForestClassifier(random_state=random_state, **params)
+        rf_no_pca.fit(X_train, y_train)
+        
+        importances = rf_no_pca.feature_importances_
+        original_feature_importance = np.zeros(len(feature_info))
+        feature_names = list(feature_info.keys())
+        
+        for i, (name, info) in enumerate(feature_info.items()):
+            original_feature_importance[i] = np.sum(importances[info['start']:info['end']])
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.bar(feature_names, original_feature_importance)
+        ax.set_title("全体の特徴量重要度")
+        ax.set_xlabel("特徴量タイプ")
+        ax.set_ylabel("重要度 (合計)")
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.show()
+
+    # --- モデルの保存 ---
+    print("\n>> --- モデルをファイルに保存中 ---")
+    joblib.dump(best_rf, 'model.joblib')
+    joblib.dump(pca, 'pca.joblib')
+    joblib.dump(scaler, 'scaler.joblib')
+    print("モデルが正常に保存されました。")
+
+    return best_rf, pca, scaler, search.best_params_ # 最適なパラメータも返す
+
+def visualize_pca_space(X_reduced, y, class_names):
+    plt.figure(figsize=(12, 10))
+    for i, cname in enumerate(class_names):
+        plt.scatter(X_reduced[y == i, 0], X_reduced[y == i, 1], label=cname, alpha=0.6, s=20)
+    plt.title('PCA Feature Space of Cat Breeds')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# --- 類似猫の検出と予測（強化版・説明機能追加） ---
+def find_and_display_similar_cats_with_prediction(
+    query_image_path, model, scaler, pca_model,
+    X_train_reduced, y_train, filepaths_train, image_ids_train, class_names, face_cascade, sift_extractor,
+    feature_info, X_train, best_params, kmeans
+):
+    print("\n>> --- 類似猫検出・品種推定 ---")
+    query_img = cv2.imread(query_image_path)
+    if query_img is None:
+        print(f"エラー: クエリ画像を読み込めません: {query_image_path}")
+        return
+    query_img_resized = cv2.resize(query_img, IMAGE_SIZE)
+    query_img_bgra = remove_background(query_img_resized)
+    query_img_no_bg = fill_transparent_background(query_img_bgra, fill_color=(255, 255, 255))
+    
+    # オリジナル特徴量の抽出
+    query_features = extract_features(query_img_no_bg, face_cascade, sift_extractor, kmeans)
+    if query_features is None:
+        print("エラー: クエリ画像から特徴量を抽出できませんでした。")
+        return
+    
+    # PCAを適用
+    query_features_scaled = scaler.transform(query_features.reshape(1, -1))
+    query_features_reduced = pca_model.transform(query_features_scaled)
+
+    # 1. 品種を推定
+    predicted_label_idx = model.predict(query_features_reduced)[0]
+    predicted_breed_name = class_names[predicted_label_idx]
+
+    # --- Wikipediaで推定品種名を検索（修正済み） ---
+    # 最初に「品種名 + 猫」で検索し、曖昧さ回避やページエラーの場合は「品種名」単体で再試行
+    search_queries = [predicted_breed_name + " 猫", predicted_breed_name]
+    breed_description = "品種の説明が見つかりませんでした。"
+    
+    for query in search_queries:
+        try:
+            breed_description = wikipedia.summary(query, sentences=3)
+            # 成功した場合、ループを抜ける
+            break 
+        except wikipedia.exceptions.DisambiguationError as e:
+            if e.options:
+                # 曖昧さ回避の場合、最初の候補を試す
+                try:
+                    breed_description = wikipedia.summary(e.options[0], sentences=3)
+                    break
+                except Exception:
+                    # 最初の候補もダメなら次のクエリへ
+                    continue
+            else:
+                # 候補がない場合は次のクエリへ
+                continue
+        except wikipedia.exceptions.PageError:
+            # ページが見つからない場合は次のクエリへ
+            continue
+        except Exception as e:
+            # その他のエラーが発生した場合
+            breed_description = f"Wikipediaから説明を取得中にエラーが発生しました: {e}"
+            break # 深刻なエラーのためループを抜ける
+    
+    # どちらの検索でも見つからなかった場合、最終メッセージを生成
+    if breed_description == "品種の説明が見つかりませんでした。":
+        breed_description = f"Wikipediaページ '{predicted_breed_name}'（または '{predicted_breed_name} 猫'）に関する有効な説明が見つかりませんでした。"
+    
+    print(f"推定品種名: {predicted_breed_name}")
+    print(f"品種説明: {breed_description}")
+    # --- 修正ここまで ---
+
+    # 2. 個別の予測に対する説明を可視化
+    # PCA前のデータを使ってモデルを再訓練し、特徴量の重要度を取得
+    rf_no_pca_explain = RandomForestClassifier(random_state=RANDOM_STATE, **best_params)
+    rf_no_pca_explain.fit(X_train, y_train)
+    
+    importances = rf_no_pca_explain.feature_importances_
+    
+    # 特徴量グループごとの重要度を合計
+    original_feature_importance_map = {}
+    
+    for name, info in feature_info.items():
+        original_feature_importance_map[name] = np.sum(importances[info['start']:info['end']])
+
+    sorted_importances = sorted(original_feature_importance_map.items(), key=lambda item: item[1], reverse=True)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    feature_names = [item[0] for item in sorted_importances]
+    importance_values = [item[1] for item in sorted_importances]
+    
+    ax.bar(feature_names, importance_values, color='skyblue')
+    ax.set_title(f"品種 '{predicted_breed_name}' と判断した理由")
+    ax.set_xlabel("特徴量タイプ")
+    ax.set_ylabel("重要度")
+    
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
+
+    # 3. 類似度を計算（品種ラベルの重み付けを導入）
+    distances = []
+    original_query_filepath = os.path.abspath(query_image_path)
+    
+    for i in range(X_train_reduced.shape[0]):
+        if os.path.abspath(filepaths_train[i]) == original_query_filepath:
+            continue
+        # ユークリッド距離
+        sim = cosine_similarity(
+        query_features_reduced,
+        X_train_reduced[i].reshape(1, -1)
+        )[0][0]
+
+        dist = 1 - sim
+        # 異なる品種なら距離を重くする
+        if y_train[i] != predicted_label_idx:
+            dist *= 1.5     
+        distances.append((dist, filepaths_train[i], image_ids_train[i], y_train[i]))
+    distances.sort(key=lambda x: x[0])
+
+    print("\n>> --- 最も類似する猫の画像（類似度・同品種優先） ---")
+    
+    plt.figure(figsize=(15, 5))
+    
+    displayed_count = 0
+    displayed_same_breed_count = 0
+    displayed_original_filepaths = set()
+    
+    for dist, filepath_augmented, img_id, label in distances:
+        if displayed_count >= 10 and displayed_same_breed_count >= SIMILAR_IMAGES_TO_DISPLAY:
+            break
+        if filepath_augmented not in displayed_original_filepaths:
+            img_original = cv2.imread(filepath_augmented)
+            if img_original is None:
+                continue
+            
+            img_original_resized = cv2.resize(img_original, IMAGE_SIZE)
+            img_bgra_display = remove_background(img_original_resized)
+            img_to_display = fill_transparent_background(img_bgra_display, fill_color=(255, 255, 255))
+            img_to_display = cv2.cvtColor(img_to_display, cv2.COLOR_BGR2RGB)
+            
+            ax = plt.subplot(1, 10, displayed_count + 1)
+            ax.imshow(img_to_display)
+            ax.set_title(f"品種: {class_names[label]}\n距離: {dist:.2f}")
+            ax.axis('off')
+
+            displayed_count += 1
+            displayed_original_filepaths.add(filepath_augmented)
+            if label == predicted_label_idx:
+                displayed_same_breed_count += 1
+
+    if displayed_count == 0:
+        print("類似画像を表示できませんでした。")
+    plt.tight_layout()
+    plt.show()
+
+# --- メイン実行ブロック ---
+if __name__ == "__main__":
+    print("--- 猫の品種分類・類似画像検索プログラム ---")
+    # 類似検索・分類に使用するクエリ画像
+    INPUT_IMAGE_PATH = "cat_cat1/Ragdoll/Ragdoll_56.jpg"
+    # OpenCVに含まれる猫顔Haar Cascadeのパス
+    face_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalcatface.xml'
+    # 顔検出器を生成
+    face_cascade = cv2.CascadeClassifier(face_cascade_path)
+    sift_extractor = cv2.SIFT_create()
+    
+    if face_cascade.empty():
+        print(f"エラー: 顔検出器のXMLファイルが見つかりません: {face_cascade_path}")
+        print("haarcascade_frontalcatface.xmlをダウンロードして、スクリプトと同じフォルダに置いてください。")
+        exit()
+
+    # 特徴量グループの情報を取得
+    feature_info = get_feature_info(IMAGE_SIZE)
+
+    # # データセットを読み込み、特徴量を抽出
+    # features, labels, filepaths, image_ids, class_names = load_and_augment_data(
+    #     DATA_DIR, IMAGE_SIZE, face_cascade, sift_extractor
+    # )
+    # if len(features) == 0:
+    #     print("エラー: 読み込んだ画像がありませんでした。データディレクトリとパスを確認してください。")
+    #     exit()
+
+    # --- 元画像のみ収集追加 ---
+    filepaths, labels, class_names = collect_image_paths(DATA_DIR)
+
+    # # --- 元画像単位で分割  追加（リーク防止） ---
+    # from sklearn.model_selection import train_test_split
+    # train_paths, test_paths, y_train_orig, y_test_orig = train_test_split(
+    #     filepaths, labels, test_size=0.2, stratify=labels, random_state=RANDOM_STATE
+    # )
+
+    # --- 元画像でtrain/test分割 ---
+    train_paths, test_paths, y_train_orig, y_test_orig = train_test_split(
+        filepaths,
+        labels,
+        test_size=0.3,
+        stratify=labels,
+        random_state=RANDOM_STATE
+    )
+    print("train original:", len(train_paths))
+    print("test original:", len(test_paths))
+
+    # --- SIFT descriptor収集 → kmeans学習 ---
+    all_descriptors = []
+
+    for path in train_paths:
+        img = cv2.imread(path)
+        if img is None:
+            continue
+
+        img = cv2.resize(img, IMAGE_SIZE)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        _, desc = sift_extractor.detectAndCompute(gray, None)
+
+        if desc is not None:
+            all_descriptors.append(desc)
+
+    # descriptorが1つもない場合の対策
+    if len(all_descriptors) == 0:
+        raise ValueError("SIFT特徴量が1つも抽出できませんでした")
+
+    all_descriptors = np.vstack(all_descriptors)
+
+    print(f"SIFT descriptor数: {all_descriptors.shape}")
+
+    # kmeans（BoVW）
+    n_clusters = min(64, len(all_descriptors))
+    kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=RANDOM_STATE)
+    kmeans.fit(all_descriptors)
+
+    print(">> kmeans学習完了")
+
+
+
+    # --- trainデータ（拡張あり） ---
+    features_train, y_train, filepaths_train, image_ids_train = extract_from_paths(
+        train_paths,
+        y_train_orig,
+        IMAGE_SIZE,
+        face_cascade,
+        sift_extractor,
+        kmeans,
+        augment=True
+    )
+
+# --- testデータ（拡張なし） ---
+    features_test, y_test, filepaths_test, image_ids_test = extract_from_paths(
+        test_paths,
+        y_test_orig,
+        IMAGE_SIZE,
+        face_cascade,
+        sift_extractor,
+        kmeans,
+        augment=False
+    )
+
+
+    # データを準備
+    X_train_scaled, X_test_scaled, y_train, y_test, scaler = prepare_data(
+        features_train,
+        features_test,
+        y_train,
+        y_test
+    )
+
+    # モデルの訓練と保存  RandomForest + PCA 学習
+    best_rf, pca_model, scaler_trained, best_params = train_and_evaluate_model(
+        X_train_scaled, X_test_scaled, y_train, y_test, class_names, scaler, feature_info=feature_info
+    )
+
+    # 特徴量の次元を削減
+    X_train_reduced = pca_model.transform(X_train_scaled)
+    X_test_reduced = pca_model.transform(X_test_scaled)
+    
+    # PCA空間の可視化
+    visualize_pca_space(X_train_reduced, y_train, class_names)
+
+    
+
+    # 類似猫の検出と予測（強化版・説明機能追加）
+    find_and_display_similar_cats_with_prediction(
+        INPUT_IMAGE_PATH, best_rf, scaler_trained, pca_model,
+        X_train_reduced, y_train, filepaths_train, image_ids_train, class_names, face_cascade, sift_extractor,
+        feature_info, features_train, best_params, kmeans
+    )
+
+    print("\n--- プログラム終了 ---")

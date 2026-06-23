@@ -1,0 +1,16 @@
+from ultralytics import YOLO
+import cv2  # OpenCV を使用
+
+# YOLOv8（最も軽量なモデルで、精度よりも速度を優先）のモデルをロード
+model = YOLO("yolov8n.pt")
+
+# 画像を解析（★★ファイルの場所はご自身の環境に合わせて書き換えて下さい）
+results = model.predict("yolo_sample1.png", save=True)
+
+# 検出結果の画像を取得
+result_img = results[0].plot()  # 検出結果を画像に描画
+
+# 画像を表示（手動で閉じるまで表示）
+cv2.imshow("YOLO Detection", result_img)
+cv2.waitKey(0)  # キー入力を待つ（ウィンドウが閉じない）
+cv2.destroyAllWindows()  # ウィンドウを閉じる
