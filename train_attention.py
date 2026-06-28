@@ -243,6 +243,9 @@ def train_model(
     num_epochs=10
 ):
 
+    loss_history = []
+    accuracy_history = []
+
     criterion = nn.CrossEntropyLoss()           # 損失関数（多クラス分類）
 
     optimizer = torch.optim.Adam(               # Adam最適化
@@ -277,13 +280,53 @@ def train_model(
         epoch_loss = running_loss / len(train_loader)         # 損失累積
         if len(train_loader)==0:
             raise ValueError("No training data.")
+        loss_history.append(epoch_loss)
+
+        correct = 0
+        total = 0
+
+        model.eval()
+
+        with torch.no_grad():
+
+            for images, labels in train_loader:
+
+                images = images.to(device)
+                labels = labels.to(device)
+
+                outputs = model(images)
+
+                _, pred = torch.max(outputs,1)
+
+                total += labels.size(0)
+                correct += (pred==labels).sum().item()
+
+        accuracy = correct/total
+
+        accuracy_history.append(accuracy)
+
+        model.train()
 
         print(
             f"Epoch {epoch+1}/{num_epochs}",
             f"Loss={epoch_loss:.4f}"
         )
 
-    return model
+    plt.figure()
+    plt.plot(cat_accuracy)
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.grid()
+    plt.show()
+
+    plt.figure()
+    plt.plot(dog_accuracy)
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.grid()
+    plt.show()
+
+    return model, loss_history, accuracy_history
 
 
 def evaluate_model(model, data_loader, class_names, title):
@@ -575,7 +618,7 @@ if __name__ == "__main__":
         num_classes=10
     )
 
-    cat_model = train_model(
+    cat_model, cat_loss, cat_accuracy = train_model(
         cat_model,
         cat_train_loader,
         num_epochs=10
@@ -592,6 +635,14 @@ if __name__ == "__main__":
         cat_model.state_dict(),
         "cat_model.pth"
     )
+
+    plt.figure()
+    plt.plot(cat_loss)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Cat Loss")
+    plt.grid()
+    plt.show()
 
 
     # -- 犬データセットとデータローダーの作成 --
@@ -628,7 +679,7 @@ if __name__ == "__main__":
         num_classes=10
     )
 
-    dog_model = train_model(
+    dog_model, dog_loss, dog_accuracy = train_model(
         dog_model,
         dog_train_loader,
         num_epochs=10
@@ -645,6 +696,14 @@ if __name__ == "__main__":
         dog_model.state_dict(),
         "dog_model.pth"
     )
+
+    plt.figure()
+    plt.plot(dog_loss)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Dog Loss")
+    plt.grid()
+    plt.show()
     
     print("学習完了")
     print("モデル読み込み完了")
