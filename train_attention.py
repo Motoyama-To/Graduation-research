@@ -17,14 +17,9 @@ import numpy as np
 import random
 from ultralytics import YOLO
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import normalize
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
-from PIL import Image
-import joblib # モデル保存のために追加
-from skimage.feature import local_binary_pattern # LBPのために追加
-from sklearn.metrics.pairwise import cosine_similarity # コサイン類似度のために追加
 import time
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
@@ -92,7 +87,7 @@ os.makedirs(CROP_DIR, exist_ok=True)
 train_transform = transforms.Compose([
 
     transforms.ToPILImage(),
-    transforms.Resize((IMAGE_SIZE)),
+    transforms.Resize(IMAGE_SIZE),
     transforms.RandomHorizontalFlip(),   # 50%で左右反転
     transforms.RandomRotation(10),       # ±10度以内でランダム回転
     transforms.ColorJitter(              # 明るさ・コントラストをランダム変更
@@ -245,7 +240,6 @@ class CBAM(nn.Module):
 def train_model(
     model,
     train_loader,
-    test_loader,
     num_epochs=10
 ):
 
@@ -281,6 +275,8 @@ def train_model(
             running_loss += loss.item()
 
         epoch_loss = running_loss / len(train_loader)         # 損失累積
+        if len(train_loader)==0:
+            raise ValueError("No training data.")
 
         print(
             f"Epoch {epoch+1}/{num_epochs}",
@@ -306,7 +302,13 @@ def evaluate_model(model, data_loader, class_names, title):
     print(f"\n--- {title} evaluation ---")
     print("Accuracy:", accuracy_score(y_true, y_pred))
     print("F1:", f1_score(y_true, y_pred, average='macro'))
-    print(classification_report(y_true, y_pred, target_names=class_names))
+    print(classification_report(
+        y_true, 
+        y_pred, 
+        labels=range(len(class_names)),
+        target_names=class_names,
+        zero_division=0
+    ))
 
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(8, 6))
@@ -576,7 +578,6 @@ if __name__ == "__main__":
     cat_model = train_model(
         cat_model,
         cat_train_loader,
-        cat_test_loader,
         num_epochs=10
     )
 
@@ -630,7 +631,6 @@ if __name__ == "__main__":
     dog_model = train_model(
         dog_model,
         dog_train_loader,
-        dog_test_loader,
         num_epochs=10
     )
 
