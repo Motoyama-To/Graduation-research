@@ -1,10 +1,23 @@
 # 猫+犬 品種分類・類似画像検索プログラム
 
-# 入力画像 -- YOLOv8 検出と切り出し -- ResNet18特徴抽出 
-# CBAM Attention
-#   ├─ CAM : どの特徴を見るか
-#   └─ SAM : どの位置を見るか
-# Adaptive Average Pooling -- 全結合層 (Linear) -- 品種分類（猫10種・犬10種）
+# --- モデル全体の処理 ---
+# 入力画像
+#   ↓ load_input_image()
+# YOLOv8で猫・犬を検出
+#   ↓ detect_and_crop_animal()
+# 動物部分を切り出し
+#   ↓ crop_animal_region()
+# ResNet18で特徴抽出
+#   ↓ extract_features_by_resnet18()
+# CBAMで重要部分を強調
+#   ├─ CAM：重要な特徴チャネルを判断
+#   └─ SAM：重要な位置を判断
+#   ↓ apply_cbam_attention()
+# Adaptive Average Poolingで特徴を圧縮
+#   ↓ pool_features()
+# Linear層で分類
+#   ↓ classify_breed()
+# 品種分類結果（猫10種・犬10種）
 
 
 # YOLO前処理 + ResNet18 + CBAM による End-to-End分類器
@@ -15,6 +28,7 @@ import os
 import cv2
 import numpy as np
 import random
+from collections import Counter
 from ultralytics import YOLO
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
@@ -237,14 +251,45 @@ class CBAM(nn.Module):
         return x
 
 # --- モデル学習関数 ---
+def calculate_loss_and_accuracy(model, data_loader, criterion):
+    model.eval()
+    running_loss = 0                    # 損失の合計を保存
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for images, labels in data_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            _, pred = torch.max(outputs, 1)
+
+            running_loss += loss.item()
+            total += labels.size(0)
+            correct += (pred == labels).sum().item()
+
+    if len(data_loader) == 0 or total == 0:
+        return 0, 0
+
+    return running_loss / len(data_loader), correct / total
+
+
+# --- モデルを学習する関数 ---
 def train_model(
     model,
     train_loader,
-    num_epochs=10
+    val_loader=None,
+    num_epochs=10,
+    title="Model"
 ):
 
     loss_history = []
     accuracy_history = []
+    val_loss_history = []
+    val_accuracy_history = []
+    best_val_accuracy = 0
+    best_epoch = 0
 
     criterion = nn.CrossEntropyLoss()           # 損失関数（多クラス分類）
 
@@ -255,7 +300,11 @@ def train_model(
 
     model.to(device)
 
+    if len(train_loader) == 0:
+        raise ValueError("No training data.")
+
     for epoch in range(num_epochs):             # 学習
+        epoch_start_time = time.perf_counter()
         model.train()
         running_loss = 0
 
@@ -278,73 +327,116 @@ def train_model(
             running_loss += loss.item()
 
         epoch_loss = running_loss / len(train_loader)         # 損失累積
-        if len(train_loader)==0:
-            raise ValueError("No training data.")
         loss_history.append(epoch_loss)
 
-        correct = 0
-        total = 0
-
-        model.eval()
-
-        with torch.no_grad():
-
-            for images, labels in train_loader:
-
-                images = images.to(device)
-                labels = labels.to(device)
-
-                outputs = model(images)
-
-                _, pred = torch.max(outputs,1)
-
-                total += labels.size(0)
-                correct += (pred==labels).sum().item()
-
-        accuracy = correct/total
-
-        accuracy_history.append(accuracy)
-
-        model.train()
-
-        print(
-            f"Epoch {epoch+1}/{num_epochs}",
-            f"Loss={epoch_loss:.4f}"
+        _, train_accuracy = calculate_loss_and_accuracy(
+            model,
+            train_loader,
+            criterion                           # 損失関数
         )
+        accuracy_history.append(train_accuracy)
 
+        # 検証用データがある場合
+        if val_loader is not None:
+            val_loss, val_accuracy = calculate_loss_and_accuracy(
+                model,
+                val_loader,
+                criterion
+            )
+            val_loss_history.append(val_loss)
+            val_accuracy_history.append(val_accuracy)
+
+            if val_accuracy > best_val_accuracy:
+                best_val_accuracy = val_accuracy
+                best_epoch = epoch + 1
+
+        epoch_time = time.perf_counter() - epoch_start_time
+
+        if val_loader is not None:
+            # 学習損失・学習正解率・検証損失・検証正解率・時間
+            print(
+                f"{title} Epoch {epoch+1}/{num_epochs} | "
+                f"train_loss={epoch_loss:.4f} | "
+                f"train_acc={train_accuracy:.4f} | "
+                f"val_loss={val_loss:.4f} | "
+                f"val_acc={val_accuracy:.4f} | "
+                f"time={epoch_time:.2f}s"
+            )
+        else:
+            print(
+                f"{title} Epoch {epoch+1}/{num_epochs} | "
+                f"train_loss={epoch_loss:.4f} | "
+                f"train_acc={train_accuracy:.4f} | "
+                f"time={epoch_time:.2f}s"
+            )
+
+    # 学習正解率の推移グラフ
     plt.figure()
-    plt.plot(cat_accuracy)
+    plt.plot(accuracy_history, label="train accuracy")
+    if val_accuracy_history:
+        plt.plot(val_accuracy_history, label="validation accuracy")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
+    plt.title(f"{title} Accuracy")
+    plt.legend()
     plt.grid()
     plt.show()
 
+    # 学習損失の推移グラフ
     plt.figure()
-    plt.plot(dog_accuracy)
+    plt.plot(loss_history, label="train loss")
+    if val_loss_history:
+        plt.plot(val_loss_history, label="validation loss")
     plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
+    plt.ylabel("Loss")
+    plt.title(f"{title} Loss")
+    plt.legend()
     plt.grid()
     plt.show()
 
-    return model, loss_history, accuracy_history
+    if val_loader is not None:
+        print(f"{title} best val_acc={best_val_accuracy:.4f} at epoch {best_epoch}")
+
+    return model, loss_history, accuracy_history, val_loss_history, val_accuracy_history
 
 
 def evaluate_model(model, data_loader, class_names, title):
     model.eval()
     y_true = []
     y_pred = []
+    y_prob = []
+    top3_correct = 0
+    total = 0
 
     with torch.no_grad():
         for images, labels in data_loader:
             images = images.to(device)
             outputs = model(images)
+            probabilities = torch.softmax(outputs, dim=1)       # 出力を確率（Softmax）へ変換
             _, pred = torch.max(outputs, 1)
+            top3 = torch.topk(probabilities, k=min(3, len(class_names)), dim=1).indices.cpu()
             y_true.extend(labels.numpy())
             y_pred.extend(pred.cpu().numpy())
+            y_prob.extend(probabilities.max(dim=1).values.cpu().numpy())
+
+            labels_cpu = labels.cpu()
+
+            # Top-3以内に正解ラベルが含まれている数を加算
+            top3_correct += sum(
+                labels_cpu[i].item() in top3[i].tolist()
+                for i in range(labels_cpu.size(0))
+            )
+            total += labels_cpu.size(0)
+
+    if total == 0:
+        raise ValueError(f"No evaluation data for {title}.")
 
     print(f"\n--- {title} evaluation ---")
-    print("Accuracy:", accuracy_score(y_true, y_pred))
-    print("F1:", f1_score(y_true, y_pred, average='macro'))
+    print(f"Accuracy: {accuracy_score(y_true, y_pred):.4f}")
+    print(f"Top-3 Accuracy: {top3_correct / total:.4f}")
+    print(f"Macro F1: {f1_score(y_true, y_pred, average='macro'):.4f}")
+    print(f"Weighted F1: {f1_score(y_true, y_pred, average='weighted'):.4f}")
+    print(f"Average confidence: {np.mean(y_prob):.4f}")                 # 平均予測確率
     print(classification_report(
         y_true, 
         y_pred, 
@@ -353,7 +445,20 @@ def evaluate_model(model, data_loader, class_names, title):
         zero_division=0
     ))
 
-    cm = confusion_matrix(y_true, y_pred)
+    print(f"\n--- {title} per-class accuracy ---")
+    for class_idx, class_name in enumerate(class_names):
+        class_total = sum(1 for label in y_true if label == class_idx)
+        class_correct = sum(
+            1
+            for true_label, pred_label in zip(y_true, y_pred)
+            if true_label == class_idx and pred_label == class_idx
+        )
+        class_accuracy = class_correct / class_total if class_total else 0
+        
+        print(f"{class_name}: {class_accuracy:.4f} ({class_correct}/{class_total})")
+
+    cm = confusion_matrix(y_true, y_pred)                               # 混同行列を作成
+    
     plt.figure(figsize=(8, 6))
     sns.heatmap(
         cm,
@@ -363,6 +468,23 @@ def evaluate_model(model, data_loader, class_names, title):
         yticklabels=class_names
     )
     plt.title(f"{title} confusion matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.tight_layout()
+    plt.show()
+
+    cm_normalized = confusion_matrix(y_true, y_pred, normalize="true")
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        cm_normalized,
+        annot=True,
+        fmt='.2f',
+        xticklabels=class_names,
+        yticklabels=class_names,
+        vmin=0,
+        vmax=1
+    )
+    plt.title(f"{title} normalized confusion matrix")
     plt.xlabel("Predicted")
     plt.ylabel("True")
     plt.tight_layout()
@@ -435,32 +557,51 @@ def get_crop_cache_path(img_path):
     return os.path.join(CROP_DIR, relative)
 
 
-def load_or_create_crop(img_path):
+# --- cache画像を読み込むor新しく作成する関数 ---
+def load_or_create_crop(img_path, return_label=False):
     cache_name = get_crop_cache_path(img_path)
 
     if os.path.exists(cache_name):
         img = cv2.imread(cache_name)
         if img is not None:
+            if return_label:
+                return img, "cached"
             return img
 
     img = cv2.imread(img_path)
     if img is None:
         raise FileNotFoundError(f"Failed to read image: {img_path}")
 
-    cropped_img, _ = detect_and_crop_animal(img, yolo_model)
+    cropped_img, detected_label = detect_and_crop_animal(img, yolo_model)
     if cropped_img is None:
         cropped_img = img
 
     os.makedirs(os.path.dirname(cache_name), exist_ok=True)
     cv2.imwrite(cache_name, cropped_img)
+    if return_label:
+        return cropped_img, detected_label
     return cropped_img
 
 
+# --- 全画像のYOLO切り抜きcacheを事前作成する関数 ---
 def prepare_crop_cache(paths):
+    crop_stats = Counter()
+
     for i, path in enumerate(paths, start=1):
-        load_or_create_crop(path)
+        _, detected_label = load_or_create_crop(path, return_label=True)
+        crop_stats[detected_label] += 1
         if i % 100 == 0 or i == len(paths):
             print(f">> YOLO crop cache: {i}/{len(paths)}")
+
+    print(
+        "YOLO crop summary:",
+        f"cat={crop_stats['cat']}",
+        f"dog={crop_stats['dog']}",
+        f"unknown={crop_stats['unknown']}",
+        f"cached={crop_stats['cached']}"
+    )
+
+    return crop_stats
 
 # --- 元画像パス収集（リーク防止用） ---
 def collect_image_paths(data_dir):
@@ -479,6 +620,13 @@ def collect_image_paths(data_dir):
     return np.array(filepaths), np.array(labels), class_names
 
 
+def print_class_counts(title, labels, class_names):
+    counts = Counter(labels)
+    print(f"\n--- {title} class counts ---")
+    for class_idx, class_name in enumerate(class_names):
+        print(f"{class_name}: {counts[class_idx]}")
+
+
 # --- Main ---
 if __name__ == "__main__":
     start_time = time.perf_counter()
@@ -487,12 +635,13 @@ if __name__ == "__main__":
 
     # 元画像のみ収集追加
     filepaths, labels, class_names = collect_image_paths(DATA_DIR)
+    print("device:", device)
+    print("total images:", len(filepaths))
+    print_class_counts("All", labels, class_names)
 
     # YOLO確認用
     random_path = random.choice(filepaths)
-
     test_img = cv2.imread(random_path)
-
     cropped_img, detected_label = detect_and_crop_animal(test_img, yolo_model)
 
     print("選ばれた画像:", random_path)
@@ -500,9 +649,7 @@ if __name__ == "__main__":
 
     # 表示
     plt.figure(figsize=(5,5))
-
     img_rgb = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB)
-
     plt.imshow(img_rgb)
     plt.title(f"YOLO Detection: {detected_label}")
     plt.axis("off")
@@ -518,6 +665,8 @@ if __name__ == "__main__":
     )
     print("train original:", len(train_paths))
     print("test original:", len(test_paths))
+    print_class_counts("Train original", y_train_orig, class_names)
+    print_class_counts("Test original", y_test_orig, class_names)
 
     # 猫・犬専用ラベル作成
     cat_label_map = {
@@ -530,7 +679,7 @@ if __name__ == "__main__":
         for idx, name in enumerate(dog_class_names)
     }
 
-    # 猫と犬でデータを分離
+    # --- 猫と犬で学習データを分離する ---
     cat_train_paths = []
     cat_train_labels = []
 
@@ -557,6 +706,7 @@ if __name__ == "__main__":
                 dog_label_map[class_name]
             )
 
+    # --- 猫と犬でテストデータを分離する ---
     cat_test_paths = []
     cat_test_labels = []
 
@@ -582,13 +732,51 @@ if __name__ == "__main__":
     print("猫 train:", len(cat_train_paths))     # 学習画像の数
     print("犬 train:", len(dog_train_paths))
 
+
+    # --- 猫データを学習用(fit)と検証用(validation)に分割する ---
+    cat_fit_paths, cat_val_paths, cat_fit_labels, cat_val_labels = train_test_split(
+        cat_train_paths,
+        cat_train_labels,
+        test_size=0.2,
+        stratify=cat_train_labels,
+        random_state=RANDOM_STATE
+    )
+
+    # --- 犬データを学習用(fit)と検証用(validation)に分割する ---
+    dog_fit_paths, dog_val_paths, dog_fit_labels, dog_val_labels = train_test_split(
+        dog_train_paths,
+        dog_train_labels,
+        test_size=0.2,
+        stratify=dog_train_labels,
+        random_state=RANDOM_STATE
+    )
+
+    print("cat fit:", len(cat_fit_paths))
+    print("cat val:", len(cat_val_paths))
+    print("cat test:", len(cat_test_paths))
+    print("dog fit:", len(dog_fit_paths))
+    print("dog val:", len(dog_val_paths))
+    print("dog test:", len(dog_test_paths))
+    print_class_counts("Cat fit", cat_fit_labels, cat_class_names)              # 猫の学習用データのクラス数
+    print_class_counts("Cat val", cat_val_labels, cat_class_names)
+    print_class_counts("Cat test", cat_test_labels, cat_class_names)
+    print_class_counts("Dog fit", dog_fit_labels, dog_class_names)
+    print_class_counts("Dog val", dog_val_labels, dog_class_names)
+    print_class_counts("Dog test", dog_test_labels, dog_class_names)
+
     prepare_crop_cache(list(train_paths) + list(test_paths))
 
     # -- 猫データセットとデータローダーの作成 --
     cat_train_dataset = PetDataset(
-        cat_train_paths,
-        cat_train_labels,
+        cat_fit_paths,
+        cat_fit_labels,
         train_transform
+    )
+
+    cat_val_dataset = PetDataset(
+        cat_val_paths,
+        cat_val_labels,
+        test_transform
     )
 
     cat_test_dataset = PetDataset(
@@ -613,15 +801,25 @@ if __name__ == "__main__":
         pin_memory=torch.cuda.is_available()
     )
 
+    cat_val_loader = DataLoader(
+        cat_val_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available()
+    )
+
     # 猫学習とモデル保存
     cat_model = BreedClassifier(
         num_classes=10
     )
 
-    cat_model, cat_loss, cat_accuracy = train_model(
+    cat_model, cat_loss, cat_accuracy, cat_val_loss, cat_val_accuracy = train_model(
         cat_model,
         cat_train_loader,
-        num_epochs=10
+        val_loader=cat_val_loader,
+        num_epochs=10,
+        title="Cat"
     )
 
     evaluate_model(
@@ -637,19 +835,27 @@ if __name__ == "__main__":
     )
 
     plt.figure()
-    plt.plot(cat_loss)
+    plt.plot(cat_loss, label="train loss")
+    plt.plot(cat_val_loss, label="validation loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Cat Loss")
+    plt.legend()
     plt.grid()
     plt.show()
 
 
     # -- 犬データセットとデータローダーの作成 --
     dog_train_dataset = PetDataset(
-        dog_train_paths,
-        dog_train_labels,
+        dog_fit_paths,
+        dog_fit_labels,
         train_transform
+    )
+
+    dog_val_dataset = PetDataset(
+        dog_val_paths,
+        dog_val_labels,
+        test_transform
     )
 
     dog_test_dataset = PetDataset(
@@ -674,15 +880,25 @@ if __name__ == "__main__":
         pin_memory=torch.cuda.is_available()
     )
 
+    dog_val_loader = DataLoader(
+        dog_val_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available()
+    )
+
     # 犬学習とモデル保存
     dog_model = BreedClassifier(
         num_classes=10
     )
 
-    dog_model, dog_loss, dog_accuracy = train_model(
+    dog_model, dog_loss, dog_accuracy, dog_val_loss, dog_val_accuracy = train_model(
         dog_model,
         dog_train_loader,
-        num_epochs=10
+        val_loader=dog_val_loader,
+        num_epochs=10,
+        title="Dog"
     )
 
     evaluate_model(
@@ -698,10 +914,12 @@ if __name__ == "__main__":
     )
 
     plt.figure()
-    plt.plot(dog_loss)
+    plt.plot(dog_loss, label="train loss")
+    plt.plot(dog_val_loss, label="validation loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Dog Loss")
+    plt.legend()
     plt.grid()
     plt.show()
     
