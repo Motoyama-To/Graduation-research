@@ -1,7 +1,32 @@
 # 猫+犬 品種分類・類似画像検索プログラム
 
-# データ生成 -- YOLOで犬猫の切り出し -- resize -- データ拡張 -- 特徴抽出
-#  -- PCA -- Random forest -- 評価
+# --- モデル全体の処理 ---
+# 入力画像
+#   ↓
+# YOLOv8で猫・犬を検出
+#   ↓ detect_and_crop_animal()
+# データ拡張
+# （回転・ズーム・明るさ変更・反転・せん断・平行移動）
+#   ↓ apply_data_augmentation()
+# 特徴量抽出
+#   ├─ ResNet18：画像全体の特徴
+#   ├─ Color Histogram：毛色・色分布
+#   └─ Grid Local Features
+#       ├─ HSVヒストグラム
+#       ├─ LBP（模様・質感）
+#       └─ Edge Density（輪郭情報）
+#   ↓ extract_features()
+# 特徴量を結合
+#   ↓
+# StandardScalerで標準化
+#   ↓ prepare_data()
+# PCAで次元削減（情報量95%を保持）
+#   ↓
+# Random Forestで学習・分類
+#   ↓ train_and_evaluate_model()
+# 品種分類結果（猫10種・犬10種）
+#   ↓
+# 学習済みモデル・PCA・Scalerを保存
 
 # YOLO + ResNet + Color + Grid + PCA + RF
 
